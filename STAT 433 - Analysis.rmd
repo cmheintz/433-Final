@@ -1,0 +1,327 @@
+---
+title: "STAT 433 - Final Project"
+author: "Frederick Kim"
+date: '2021 5 4 '
+output: pdf_document
+---
+
+```{r setup, warning = FALSE, message = FALSE}
+# Chunk options
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	comment = NULL,
+	cache = TRUE
+)
+
+# Vector of package names
+packages <- c("knitr", "dplyr", "readr", "data.table", "tidyverse", "usa", "car", 
+              "AER", "ggraph", "tidygraph", "tidymodels", "ggplot2", "choroplethr",
+              "choroplethrZip", "superheat", "ggthemes", "wesanderson", "olsrr", 
+              "RegClust", "MASS", "tigris", "leaflet", "tidytext", "ggrepel",
+              "factoextra")
+
+# Installing packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+# Loading packages
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+##### Raw Datas
+
+```{r}
+setwd("~/Desktop/433Final")
+
+educ <- read.csv("ACSST5Y2018.S1501_data_with_overlays_2021-04-22T200644.csv", skip = 1)
+soi_data <- fread("https://www.irs.gov/pub/irs-soi/18zpallagi.csv")
+race_raw <- read.csv("https://data.diversitydatakids.org/files/Demographics/01001_12_C/01001_12_C_860_5/01001_12_C_860_5.csv")
+
+zip_cca <- usa::zipcodes %>%
+  filter(city == "Chicago") %>%
+  dplyr::select(zip)
+```
+
+#### Modifications
+
+#### racial data:   
+  
+```{r}
+tempt4 <- race_raw %>%
+  mutate(geoid = stringr::str_split(geoid, "US") %>% 
+           map_chr(., 2)) %>%
+  rename(zipcode = geoid) %>%
+  dplyr::select(-contains("se")) %>%
+  dplyr::select(zipcode, 
+         year, 
+         total_est, 
+         aian_est, 
+         api_est, 
+         asian_est, 
+         black_est, 
+         hisp_est, 
+         nhopi_est, 
+         nhwhite_est, 
+         other_est) %>%
+  filter(zipcode %in% zip_cca$zip,
+         year == "2013-2017")
+```
+
+We use ethnic demographic dataset containing adults who are older than 25 years recorded by zipcode. We filtered the observations contained in zipcodes of Chicago city and selected total, Asian, Pacific Asian, African American, Hispanic, and Non-Hispanic White population variables. We choose adults who are older than 25 years because simply, under 25 years are usually pursuing for their degree. Therefore, adults who are over 25 seem an appropriate specimen to study the effects of education. However, 2018 and over dataset are not available, we use estimated demographic dataset between 2013 and 2017.
+
+# Chicago SOI Dataset
+```{r}
+soi_chicago1 <- soi_data %>%
+  filter(zipcode %in% zip_cca$zip,
+         A00100 > 0,
+         A18500 > 0,
+         A00200 > 0) %>%
+  mutate(zipcode = as.character(zipcode)) %>%
+  group_by(zipcode) %>% 
+  summarise(total_income = sum(A00100),
+            total_real_estate = sum(A18500),
+            total_wage = sum(A00200)) %>%
+  left_join(tempt4) %>%
+  mutate(`Avg. Income` = total_income/total_est,
+         `Prop. White` = (nhwhite_est/ total_est),
+         `Prop. Black` = (black_est / total_est),
+         `Prop. H. or Pac. I.` = aian_est / total_est,
+         `Prop. Asian` = asian_est / total_est,
+         `Prop. Hispanic` = hisp_est / total_est) %>%
+   dplyr::select(zipcode, contains("Prop."),contains("Avg."))
+
+soi_chicago2 <- soi_data %>%
+  filter(zipcode %in% zip_cca$zip,
+         A00100 > 0,
+         A18500 > 0,
+         A00200 > 0) %>%
+  mutate(zipcode = as.character(zipcode)) %>%
+  group_by(zipcode) %>% 
+  summarise(total_income = sum(A00100),
+            total_real_estate = sum(A18500),
+            total_wage = sum(A00200)) %>%
+  left_join(tempt4) %>%
+  mutate(`Avg. Income` = total_income/total_est,
+         `Prop. White` = (nhwhite_est/ total_est),
+         `Prop. Black` = (black_est / total_est),
+         `Prop. H. or Pac. I.` = aian_est / total_est,
+         `Prop. Asian` = asian_est / total_est,
+         `Prop. Hispanic` = hisp_est / total_est,
+         PredMinority = (1 - `Prop. White`), 
+         `Mostly Minority` = ifelse(PredMinority > 0.5, "Mostly Minority", "Mostly White")) %>%
+   dplyr::select(zipcode, contains("Prop."),contains("Avg."),`Mostly Minority`)
+```
+
+Income is pulled from SOI tax dataset. We join the Chicago ethnic data and caculate averages of income, property tax, and wage (e.g. total income/ total population) of each zipcode. The data was recored from 2018. 
+
+
+# Chicago Education
+```{r}
+chicago_educ1 <- educ %>%
+  dplyr::select(-Geographic.Area.Name,
+         -starts_with("Margin"),
+         -contains(c("percent", "male"))) %>%
+  mutate(zipcode = stringr::str_split(id, "US") %>% map_chr(., 2)) %>%
+  filter(zipcode %in% zip_cca$zip) %>%
+  rename_with(~ gsub(".", " ", .x, fixed = TRUE)) %>%
+  rename_with(~ gsub("  ", " ", .x, fixed = TRUE)) %>%
+  rename_with(~ gsub("Estimate Total", "", .x, fixed = TRUE)) %>%
+  rename_with(~ gsub("Population", "", .x, fixed = TRUE)) %>%
+  rename_with(~ gsub("years", "", .x, fixed = TRUE)) %>%
+  mutate(`Prop. No High School` = `  25  and over Less than 9th grade`/`  25  and over`,
+         `Prop. Some High School` = `  25  and over 9th to 12th grade no diploma`/`  25  and over`,
+         `Prop. High School Grad` = `  25  and over High school graduate or higher`/ `  25  and over`,
+         `Prop. Some College` = `  25  and over High school graduate or higher`/ `  25  and over`,
+         `Prop. College Grad` = `  25  and over Bachelor s degree or higher` / `  25  and over`) %>%
+  dplyr::select(zipcode, contains("Prop."))
+```
+
+We pulled the observations in education raw dataset which are located in Chicago. We then select Total number of 25 years and over, 25 years and over who graduate highschool or more, and 25 years and over who possess bachelor's degree or higher. This is also recorded in 2018 and each observations are zipcodes. The original variable names were hard to read, we removed the blank spaces and removed all the unnecessary special characters.
+
+
+# 1. Hierachal Clustering:
+
+```{r}
+combined_chicago <- chicago_educ1 %>%
+   left_join(soi_chicago1) %>% 
+   dplyr::select(-`Avg. Income`) # Income left out because its dissimilarity makes plot uninterpretable
+
+cluster_df1 <- combined_chicago %>%
+  column_to_rownames(var = "zipcode")
+
+cluster_df1 <- as.data.frame(t(cluster_df1))
+
+D1 <- cluster_df1 %>%
+  dist()
+
+hclust_result1 <- hclust(D1)
+
+plot(hclust_result1)
+
+hclust_graph1 <- as_tbl_graph(hclust_result1, height = height)
+hclust_graph1 <- hclust_graph1 %>%
+  mutate(height = ifelse(height == 0, 27, height)) # shorten the final edge
+
+hclust_graph1
+```
+
+
+# PCA:
+
+```{r}
+combined_chicago <- chicago_educ1 %>%
+   left_join(soi_chicago1) 
+
+pca_df1 <- combined_chicago
+
+pca_rec1 <- recipe(~., data = pca_df1) %>%
+  update_role(zipcode, new_role = "id") %>%
+  step_normalize(all_predictors()) %>%
+  step_pca(all_predictors())
+
+pca_prep1 <- prep(pca_rec1)
+
+components1 <- tidy(pca_prep1, 2)
+scores1 <- juice(pca_prep1)
+variances1 <- tidy(pca_prep1, 2, type = "variance")
+
+ggplot(variances1) +
+  geom_col(aes(component, value))
+
+pca_df1 <- data.frame(combined_chicago, row.names = 1)
+
+res.pca <- prcomp(pca_df1, scale = TRUE)
+fviz_eig(res.pca)
+
+fviz_pca_ind(res.pca,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             )
+
+fviz_pca_var(res.pca,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+             )
+
+# Biplot
+fviz_pca_biplot(res.pca, repel = TRUE,
+                col.var = "#2E9FDF", # Variables color
+                col.ind = "#696969"  # Individuals color
+                )
+
+# Eigenvalues
+eig.val <- get_eigenvalue(res.pca)
+e_val <- eig.val
+colnames(e_val) <- c("Eigen Value", "% Variance", "Cumulative % Variance")
+kable(e_val,
+                   align = c('l', 'c', 'c', 'c'))
+  
+# Results for Variables
+res.var <- get_pca_var(res.pca)
+res.var$coord          # Coordinates
+res.var$contrib        # Contributions to the PCs
+res.var$cos2           # Quality of representation 
+
+# Results for individuals
+res.ind <- get_pca_ind(res.pca)
+res.ind$coord          # Coordinates
+res.ind$contrib        # Contributions to the PCs
+res.ind$cos2           # Quality of representation 
+```
+
+```{r}
+soi_chicago2 <- soi_data %>%
+  filter(zipcode %in% zip_cca$zip,
+         A00100 > 0,
+         A18500 > 0,
+         A00200 > 0) %>%
+  mutate(zipcode = as.character(zipcode)) %>%
+  group_by(zipcode) %>% 
+  summarise(total_income = sum(A00100),
+            total_real_estate = sum(A18500),
+            total_wage = sum(A00200)) %>%
+  left_join(tempt4) %>%
+  mutate(`Avg. Income` = total_income/total_est,
+         `Prop. White` = (nhwhite_est/ total_est),
+         `Prop. Black` = (black_est / total_est),
+         `Prop. H. or Pac. I.` = aian_est / total_est,
+         `Prop. Asian` = asian_est / total_est,
+         `Prop. Hispanic` = hisp_est / total_est,
+         PredMinority = (1 - `Prop. White`), 
+         `Mostly Minority` = ifelse(PredMinority > 0.5, "Mostly Minority", "Mostly White")) %>%
+   dplyr::select(zipcode, contains("Prop."),contains("Avg."),`Mostly Minority`)
+
+chicago_educ1 <- educ %>%
+  dplyr::select(-Geographic.Area.Name,
+         -starts_with("Margin"),
+         -contains(c("percent", "male"))) %>%
+  mutate(zipcode = stringr::str_split(id, "US") %>% map_chr(., 2)) %>%
+  filter(zipcode %in% zip_cca$zip) %>%
+  rename_with(~ gsub(".", " ", .x, fixed = TRUE)) %>%
+  rename_with(~ gsub("  ", " ", .x, fixed = TRUE)) %>%
+  rename_with(~ gsub("Estimate Total", "", .x, fixed = TRUE)) %>%
+  rename_with(~ gsub("Population", "", .x, fixed = TRUE)) %>%
+  rename_with(~ gsub("years", "", .x, fixed = TRUE)) %>%
+  mutate(`Prop. No High School` = `  25  and over Less than 9th grade`/`  25  and over`,
+         `Prop. Some High School` = `  25  and over 9th to 12th grade no diploma`/`  25  and over`,
+         `Prop. High School Grad` = `  25  and over High school graduate or higher`/ `  25  and over`,
+         `Prop. Some College` = `  25  and over High school graduate or higher`/ `  25  and over`,
+         `Prop. College Grad` = `  25  and over Bachelor s degree or higher` / `  25  and over`) %>%
+  dplyr::select(zipcode, contains("Prop."))
+
+combined_chicago <- chicago_educ1 %>%
+   left_join(soi_chicago2)
+
+groups <- as.factor(combined_chicago$`Mostly Minority`)
+fviz_pca_ind(res.pca,
+             col.ind = groups, # color by groups
+             palette = c("#00AFBB",  "#FC4E07"),
+             addEllipses = TRUE, # Concentration ellipses
+             ellipse.type = "confidence",
+             legend.title = "Groups",
+             repel = TRUE
+             )
+
+library(magrittr) # for pipe %>%
+library(dplyr)   # everything else
+# 1. Individual coordinates
+res.ind <- get_pca_ind(res.pca)
+# 2. Coordinate of groups
+coord.groups <- res.ind$coord %>%
+  as_data_frame() %>%
+  dplyr::select(Dim.1, Dim.2) %>%
+  mutate(`Mostly Minority` = groups) %>%
+  group_by(`Mostly Minority`) %>%
+  summarise(
+    Dim.1 = mean(Dim.1),
+    Dim.2 = mean(Dim.2)
+    )
+coord.groups
+```
+
+
+If you look at the screen plot, the variance rapidly drops at 2 components and increasing again. Since, we want the variance to be as small as possible, we choose two principal components.
+
+
+```{r}
+components_1 <- components1 %>%
+  filter(component %in% str_c("PC", 1:2)) %>%
+  mutate(terms = reorder_within(terms, abs(value), component))
+
+ggplot(components_1, aes(value, terms)) +
+   geom_col(show.legend = FALSE) +
+   facet_wrap(~ component, scales = "free_y") +
+   scale_y_reordered() +
+   labs(y = NULL) +
+   theme(axis.text = element_text(size = 7))
+   
+
+```
+For ths component 1, it's interesting that the less you 
+
